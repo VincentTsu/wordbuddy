@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Left page of a stylized book -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,30 L50,34 L50,78 L34,74 Z" />
+    <!-- Right page -->
+    <path
+        android:fillColor="#E0E7FF"
+        android:pathData="M50,34 L74,30 L74,74 L50,78 Z" />
+    <!-- Spine / binding -->
+    <path
+        android:fillColor="#C7D2FE"
+        android:pathData="M48,33 L52,34 L52,78 L48,77 Z" />
+    <!-- Bottom-left right-page curl -->
+    <path
+        android:fillColor="#C7D2FE"
+        android:pathData="M34,74 L50,78 L50,74 Z" />
+</vector>

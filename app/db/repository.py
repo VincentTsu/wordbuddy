@@ -343,6 +343,13 @@ class WordRepository:
                 raise
 
     def delete_word(self, word_id: int):
+        # Track this deletion so sync doesn't re-insert it from remote
+        import app.services.sync_service as _ss
+        row = self._conn.execute(
+            "SELECT word FROM words WHERE id = ?", (word_id,)
+        ).fetchone()
+        if row:
+            _ss.sync_service.track_deletion(row[0])
         self._conn.execute("DELETE FROM words WHERE id = ?", (word_id,))
         self._conn.commit()
 

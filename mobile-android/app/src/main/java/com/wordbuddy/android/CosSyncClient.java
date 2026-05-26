@@ -11,7 +11,9 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 
 final class CosSyncClient {
     private final SettingsStore settings;
@@ -27,16 +29,28 @@ final class CosSyncClient {
             throw new IllegalStateException("请先配置 COS");
         }
         File dbFile = db.dbFile(context);
+        // Merge WAL into main file before hashing, otherwise the MD5
+        // may not reflect recent writes and the comparison would be stale.
+        db.checkpoint();
         String remote = headEtag();
         if (!remote.isEmpty() && dbFile.exists()) {
             String local = Utils.md5Hex(dbFile);
             if (!local.equals(remote)) {
+                // Upload local first so deletions propagate to cloud
+                // before we pull remote changes.  Otherwise a word deleted
+                // locally would be re-inserted by the merge below.
+                upload(dbFile);
                 File tmp = File.createTempFile("word_buddy_remote", ".db", context.getCacheDir());
                 download(tmp);
-                int merged = db.mergeFrom(tmp);
+                Set<String> deleted = meta.getStringSet("deleted_words", new HashSet<>());
+                int merged = db.mergeFrom(tmp, deleted);
                 tmp.delete();
                 db.checkpoint();
-                upload(dbFile);
+                // Clear deletion tracking — upload succeeded so deletions are
+                // now reflected in the remote file.
+                if (!deleted.isEmpty()) {
+                    meta.edit().remove("deleted_words").apply();
+                }
                 meta.edit().putString("last_uploaded_etag", Utils.md5Hex(dbFile)).apply();
                 return "已合并云端词库：" + merged + " 条变更";
             }
@@ -53,11 +67,23 @@ final class CosSyncClient {
             String local = Utils.md5Hex(dbFile);
             if (!local.equals(lastUploaded)) {
                 upload(dbFile);
+                // Upload succeeded — clear deletion tracking since deletions
+                // are now reflected in the remote file.
+                Set<String> deleted = meta.getStringSet("deleted_words", null);
+                if (deleted != null && !deleted.isEmpty()) {
+                    meta.edit().remove("deleted_words").apply();
+                }
                 meta.edit().putString("last_uploaded_etag", Utils.md5Hex(dbFile)).apply();
                 return "已上传本地改动";
             }
         }
         return "词库已是最新";
+    }
+
+    void trackDeletion(String word) {
+        Set<String> deleted = new HashSet<>(meta.getStringSet("deleted_words", new HashSet<>()));
+        deleted.add(word.toLowerCase());
+        meta.edit().putStringSet("deleted_words", deleted).apply();
     }
 
     void download(File dest) throws Exception {

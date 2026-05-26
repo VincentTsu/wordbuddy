@@ -80,6 +80,16 @@ class SyncService:
         except Exception as e:
             logger.warning(f"保存同步元信息失败: {e}")
 
+    @staticmethod
+    def _wal_checkpoint():
+        """PASSIVE checkpoint to merge WAL into main file without blocking."""
+        try:
+            from app.db.repository import word_repo
+            if word_repo._conn is not None:
+                word_repo._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except Exception:
+            pass
+
     # ────────── COS 客户端 ──────────
 
     def _get_client(self):
@@ -171,6 +181,10 @@ class SyncService:
             meta = self._load_meta()
             meta["last_uploaded_etag"] = local_md5
             meta["last_upload_time"] = datetime.now().isoformat()
+            # Upload succeeded — clear deletion tracking since the deleted
+            # words are now gone from the remote file too.
+            if "deleted" in meta:
+                del meta["deleted"]
             self._save_meta(meta)
 
             self._last_sync_time = datetime.now().strftime("%H:%M:%S")
@@ -274,6 +288,10 @@ class SyncService:
         """检查是否有未上传的本地改动"""
         if not db_path.exists():
             return False
+        # WAL checkpoint before computing MD5 — otherwise un-checkpointed
+        # writes would not be reflected in the main file hash, causing the
+        # upload check to see no change and skip the upload entirely.
+        self._wal_checkpoint()
         meta = self._load_meta()
         last_uploaded = meta.get("last_uploaded_etag", "")
         local_md5 = _md5_of_file(db_path)
@@ -328,10 +346,14 @@ class SyncService:
                 local_words[d['word'].lower()] = d
 
             merged = 0
+            deleted = self._get_deleted_words()
 
             for word_lower, r_row in remote_words.items():
                 r = dict(zip(col_names, r_row))
                 if word_lower not in local_words:
+                    # Skip if we intentionally deleted this word
+                    if word_lower in deleted:
+                        continue
                     # 远端有、本地没有 → 插入
                     cols = ",".join(col_names[1:])  # skip id
                     placeholders = ",".join(["?" for _ in col_names[1:]])
@@ -377,6 +399,25 @@ class SyncService:
         if remote.get('last_reviewed_at', '') > local.get('last_reviewed_at', ''):
             return True
         return (remote.get('total_reviews', 0) or 0) > (local.get('total_reviews', 0) or 0)
+
+    def track_deletion(self, word: str):
+        """Record a word deletion so merge won't re-insert it from remote."""
+        meta = self._load_meta()
+        deleted = meta.get("deleted", [])
+        if word.lower() not in deleted:
+            deleted.append(word.lower())
+            meta["deleted"] = deleted
+            self._save_meta(meta)
+
+    def _get_deleted_words(self) -> set:
+        meta = self._load_meta()
+        return set(meta.get("deleted", []))
+
+    def _clear_deleted_words(self):
+        meta = self._load_meta()
+        if "deleted" in meta:
+            del meta["deleted"]
+            self._save_meta(meta)
 
     def sync_now(self, close_db_fn=None, reopen_db_fn=None, force: bool = False) -> Tuple[bool, str]:
         """

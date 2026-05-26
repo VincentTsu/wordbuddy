@@ -168,7 +168,7 @@ final class WordDbHelper extends SQLiteOpenHelper {
         getWritableDatabase().delete("words", "id = ?", new String[]{String.valueOf(id)});
     }
 
-    int mergeFrom(File otherDbFile) {
+    int mergeFrom(File otherDbFile, java.util.Set<String> deletedWords) {
         SQLiteDatabase remote = SQLiteDatabase.openDatabase(
                 otherDbFile.getAbsolutePath(),
                 null,
@@ -177,6 +177,10 @@ final class WordDbHelper extends SQLiteOpenHelper {
         int changed = 0;
         try (Cursor c = remote.rawQuery("SELECT * FROM words", null)) {
             for (Word remoteWord : readWords(c)) {
+                // Skip words that were intentionally deleted on this device
+                if (deletedWords != null && deletedWords.contains(remoteWord.word.toLowerCase())) {
+                    continue;
+                }
                 Word localWord = getByText(remoteWord.word);
                 if (localWord == null) {
                     getWritableDatabase().insertOrThrow("words", null, valuesFor(remoteWord));
@@ -220,7 +224,7 @@ final class WordDbHelper extends SQLiteOpenHelper {
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_is_mastered ON words(is_mastered)");
     }
 
-    private Word getByText(String word) {
+    Word getByText(String word) {
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor c = db.rawQuery("SELECT * FROM words WHERE word = ? COLLATE NOCASE", new String[]{word})) {
             List<Word> words = readWords(c);
