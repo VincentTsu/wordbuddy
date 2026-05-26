@@ -1,0 +1,18 @@
+{
+  "llm": {
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "sk-your-api-key-here",
+    "model": "gpt-4o-mini"
+  },
+  "cos": {
+    "secret_id": "your-secret-id",
+    "secret_key": "your-secret-key",
+    "bucket": "your-bucket-name",
+    "region": "ap-guangzhou"
+  },
+  "settings": {
+    "review_interval_minutes": 30,
+    "auto_start": false,
+    "theme": "light"
+  }
+}

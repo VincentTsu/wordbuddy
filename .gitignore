@@ -1,0 +1,16 @@
+﻿dist/
+build/
+__pycache__/
+*.pyc
+*.pyo
+*.spec
+*.apk
+*.aab
+mobile-android/app/build/
+mobile-android/.gradle/
+mobile-android/build/
+mobile-android/local.properties
+.workbuddy/
+*.bak
+*.backup
+nul
