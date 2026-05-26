@@ -130,8 +130,6 @@ class AppController(QObject):
           3. 不需要 → 直接返回
           4. 最后检查是否需要上传本地改动
         """
-        from services.sync_service import sync_service  # 相对导入在打包后可能有问题
-        # 用绝对导入
         from app.services.sync_service import sync_service
         from app.config import get_db_path
         db_path = get_db_path()
