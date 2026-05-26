@@ -247,11 +247,11 @@ class SyncService:
             verify_size = os.path.getsize(local_db_path)
             logger.info(f"✅ 文件已替换: {local_db_path.name} ({verify_size} bytes)")
 
-            # 记录元信息
+            # 记录元信息：只更新 last_downloaded_etag，不覆盖 last_uploaded_etag
+            # 这样 check_need_upload 仍能正确判断本地是否有未上传的改动
             meta = self._load_meta()
             meta["last_downloaded_etag"] = remote_etag or downloaded_md5
             meta["last_download_time"] = datetime.now().isoformat()
-            meta["last_uploaded_etag"] = remote_etag or downloaded_md5  # 防止误判
             self._save_meta(meta)
 
             self._last_sync_time = datetime.now().strftime("%H:%M:%S")
@@ -262,14 +262,13 @@ class SyncService:
             return False, f"下载失败: {str(e)[:200]}"
 
     def check_need_download(self, db_path: Path) -> bool:
-        """快速检查是否需要下载（不下载，不改文件）"""
+        """快速检查是否需要下载：远端是否有新数据（不比较本地 MD5）"""
         remote_etag, _ = self.head_remote()
         if not remote_etag:
             return False
-        if db_path.exists():
-            local_md5 = _md5_of_file(db_path)
-            return local_md5 != remote_etag
-        return True
+        meta = self._load_meta()
+        last_downloaded = meta.get("last_downloaded_etag", "")
+        return remote_etag != last_downloaded
 
     def check_need_upload(self, db_path: Path) -> bool:
         """检查是否有未上传的本地改动"""
@@ -277,109 +276,187 @@ class SyncService:
             return False
         meta = self._load_meta()
         last_uploaded = meta.get("last_uploaded_etag", "")
-        if not last_uploaded:
-            return False  # 从未上传过，不需要主动上传
         local_md5 = _md5_of_file(db_path)
+        if not last_uploaded:
+            # 从未上传过——只有本地确实有数据时才上传
+            # 避免用空数据库覆盖远端的有效数据
+            return db_path.stat().st_size > 1024 and local_md5 != "d41d8cd98f00b204e9800998ecf8427e"
         return local_md5 != last_uploaded
+
+    def merge_from_remote(self, db_path: Path) -> int:
+        """
+        下载远端数据库并与本地合并（逐词合并，不替换文件）。
+        类似 Android 端的 mergeFrom 逻辑。
+        返回合并的词条数。调用前确保 word_repo 已初始化。
+        """
+        import sqlite3
+        from app.config import config
+        from app.constants import COS_OBJECT_KEY
+
+        client, bucket = self._get_client()
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            client.download_file(Bucket=bucket, Key=COS_OBJECT_KEY, DestFilePath=tmp_path)
+            remote_conn = sqlite3.connect(f"file:{tmp_path}?mode=ro", uri=True)
+            remote_cur = remote_conn.cursor()
+
+            # 获取远端所有单词
+            remote_cur.execute("SELECT * FROM words")
+            remote_rows = remote_cur.fetchall()
+            remote_words = {}
+            for row in remote_rows:
+                remote_words[row[1].lower()] = row  # word is column 1 (NOCASE key)
+
+            remote_conn.close()
+
+            # 获取本地所有单词
+            from app.db.repository import word_repo
+            from app.config import get_db_path
+            if word_repo._conn is None:
+                word_repo.initialize(get_db_path())
+            local_conn = word_repo._conn
+            local_cur = local_conn.cursor()
+            local_cur.execute("SELECT * FROM words")
+            local_rows = local_cur.fetchall()
+            # 用字典存储列名
+            col_names = [desc[0] for desc in local_cur.description]
+            local_words = {}
+            for row in local_rows:
+                d = dict(zip(col_names, row))
+                local_words[d['word'].lower()] = d
+
+            merged = 0
+
+            for word_lower, r_row in remote_words.items():
+                r = dict(zip(col_names, r_row))
+                if word_lower not in local_words:
+                    # 远端有、本地没有 → 插入
+                    cols = ",".join(col_names[1:])  # skip id
+                    placeholders = ",".join(["?" for _ in col_names[1:]])
+                    local_conn.execute(
+                        f"INSERT INTO words ({cols}) VALUES ({placeholders})",
+                        r_row[1:]
+                    )
+                    merged += 1
+                else:
+                    local_w = local_words[word_lower]
+                    # 优先保留复习进度更新的那一边
+                    if self._should_prefer_remote(local_w, r):
+                        set_clauses = ",".join(f"{c}=?" for c in col_names[1:])
+                        local_conn.execute(
+                            f"UPDATE words SET {set_clauses} WHERE word=? COLLATE NOCASE",
+                            list(r_row[1:]) + [r['word']]
+                        )
+                        merged += 1
+
+            local_conn.commit()
+
+            # 更新元信息
+            remote_etag, _ = self.head_remote()
+            meta = self._load_meta()
+            meta["last_downloaded_etag"] = remote_etag
+            meta["last_download_time"] = datetime.now().isoformat()
+            self._save_meta(meta)
+
+            logger.info(f"合并完成：{merged} 条变更")
+            return merged
+
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _should_prefer_remote(local: dict, remote: dict) -> bool:
+        """判断是否用远端数据覆盖本地（逐字合并策略）"""
+        if (not local.get('definition')) and remote.get('definition'):
+            return True
+        if remote.get('last_reviewed_at', '') > local.get('last_reviewed_at', ''):
+            return True
+        return (remote.get('total_reviews', 0) or 0) > (local.get('total_reviews', 0) or 0)
 
     def sync_now(self, close_db_fn=None, reopen_db_fn=None, force: bool = False) -> Tuple[bool, str]:
         """
-        手动同步：先下载（拉取最新），再按需上传（仅本地有改动时）。
-        
+        手动同步：先上传本地改动，再合并远端新数据（逐词合并，不替换文件）。
+
         :param close_db_fn: 关闭 DB 的回调（可选，用于释放文件锁）
         :param reopen_db_fn: 重新打开 DB 的回调（可选）
-        :param force: 强制下载，忽略 MD5 比较
+        :param force: 强制合并远端数据
         """
         from app.config import get_db_path
         db_path = get_db_path()
 
-        need_dl = force or self.check_need_download(db_path)
-        downloaded = False
+        msgs = []
 
-        if need_dl:
-            if close_db_fn:
-                close_db_fn()
-            ok, msg = self.download_to_replace(db_path, force=force)
-            logger.info(f"手动同步下载结果: ok={ok}, msg={msg}")
-            if ok and "已下载" in msg:
-                downloaded = True
-                if reopen_db_fn:
-                    reopen_db_fn()
-            elif reopen_db_fn:
-                # 下载失败也要重新打开
-                reopen_db_fn()
-        else:
-            logger.info("手动同步：无需下载")
-
-        # 只有本地有未上传的改动时才上传，避免覆盖远端新数据
-        need_up = self.check_need_upload(db_path)
-        if need_up:
+        # Step 1: 先上传本地改动（保留本地数据到远端）
+        if self.check_need_upload(db_path):
             ok_up, msg_up = self.upload(db_path)
-            if downloaded and ok_up:
-                return True, "双向同步完成"
-            elif ok_up:
-                return True, "上传成功"
-            else:
-                return False, f"上传失败: {msg_up}"
+            logger.info(f"手动同步上传: {msg_up}")
+            if ok_up:
+                msgs.append("已上传本地改动")
 
-        if downloaded:
-            return True, "已下载最新词库"
+        # Step 2: 再合并远端新数据（逐词合并，不替换文件）
+        need_dl = force or self.check_need_download(db_path)
+        if need_dl:
+            try:
+                merged = self.merge_from_remote(db_path)
+                if merged > 0:
+                    msgs.append(f"已合并 {merged} 条云端词条")
+                else:
+                    msgs.append("云端与本地一致")
+            except Exception as e:
+                logger.error(f"合并远端失败: {e}")
+                msgs.append(f"合并失败: {str(e)[:100]}")
         else:
-            return True, "词库已是最新，无需同步"
+            msgs.append("云端无新数据")
+
+        msg = "；".join(msgs) if msgs else "无需同步"
+        return True, msg
 
     def startup_sync(self, close_db_fn=None, reopen_db_fn=None) -> Tuple[bool, str]:
         """
-        启动时同步：
-        1. 先从 COS 下载（若远端有更新）
-        2. 再上传本地（若本地有新改动）
-        
-        返回 (downloaded, msg)：downloaded=True 表示确实下载了新文件
-        
-        :param close_db_fn: 关闭 DB 的回调（由主线程通过信号注入）
-        :param reopen_db_fn: 重新打开 DB 的回调
+        启动时同步（逐词合并策略，不替换文件）：
+        1. 先上传本地改动
+        2. 再合并远端新数据
+
+        返回 (downloaded, msg)
         """
         from app.config import config, get_db_path
         if not config.is_cos_configured():
             return False, "COS 未配置"
 
         db_path = get_db_path()
-
-        # Step1: 检查并下载
-        need_dl = self.check_need_download(db_path)
         downloaded = False
 
-        if need_dl:
-            logger.info("启动同步 → 远端有更新，准备下载")
-            if close_db_fn:
-                close_db_fn()
-            ok, msg = self.download_to_replace(db_path)
-            logger.info(f"启动同步下载结果: {msg}")
-            if ok and "已下载" in msg:
-                downloaded = True
-            # 无论成败都尝试重新打开 DB
-            if reopen_db_fn:
-                try:
-                    reopen_db_fn()
-                except Exception as e:
-                    logger.error(f"重启 DB 失败: {e}")
-        else:
-            logger.info("启动同步 → 无需下载（本地已是最新或远端无数据）")
-
-        # Step2: 如果本地有未上传的改动，上传
-        need_up = self.check_need_upload(db_path)
-        if need_up:
-            logger.info("启动同步 → 本地有未上传的改动，上传中")
+        # Step 1: 上传本地改动
+        if self.check_need_upload(db_path):
+            logger.info("启动同步 → 本地有未上传的改动，先上传")
             ok_up, msg_up = self.upload(db_path)
             logger.info(f"启动同步上传结果: {msg_up}")
-        else:
-            logger.info("启动同步 → 本地无新改动，跳过上传")
 
-        return downloaded, "已下载" if downloaded else "无需下载"
+        # Step 2: 合并远端新数据
+        need_dl = self.check_need_download(db_path)
+        if need_dl:
+            logger.info("启动同步 → 远端有更新，开始合并")
+            try:
+                merged = self.merge_from_remote(db_path)
+                logger.info(f"启动同步合并结果: {merged} 条变更")
+                if merged > 0:
+                    downloaded = True
+            except Exception as e:
+                logger.error(f"启动同步合并失败: {e}")
+        else:
+            logger.info("启动同步 → 无需合并（远端无变化）")
+
+        return downloaded, "已合并" if downloaded else "无需同步"
 
     def post_query_sync(self):
         """
         查词后同步（后台线程）：
-        先检查远端是否有更新（若有则先关闭 DB 再下载），再上传本地数据
+        先上传本地改动，再合并远端新数据（逐词合并不替换文件）。
         """
         from app.config import config, get_db_path
         if not config.is_cos_configured():
@@ -388,48 +465,20 @@ class SyncService:
 
         def _sync():
             db_path = get_db_path()
-            downloaded = False
-
-            # Step1: 检查远端是否比本地新
-            need_dl = self.check_need_download(db_path)
-            if need_dl:
-                logger.info(f"查词后 → 远端有更新，准备下载")
-                # 关闭 DB 释放锁
-                try:
-                    from app.db.repository import word_repo
-                    word_repo.close()
-                    logger.info("查词后 → DB 已关闭")
-                except Exception as e:
-                    logger.warning(f"查词后关闭 DB 失败: {e}")
-
-                ok, msg = self.download_to_replace(db_path)
-                logger.info(f"查词后下载结果: {msg}")
-                if ok and "已下载" in msg:
-                    downloaded = True
-
-                # 通知主线程重载
-                if _on_download_success:
-                    try:
-                        _on_download_success()
-                        logger.info("查词后 → 已通知主线程重载 DB")
-                    except Exception as e:
-                        logger.error(f"通知主线程重载失败: {e}")
-                else:
-                    logger.warning("查词后 → _on_download_success 未设置，无法通知主线程重载！")
-
-            # Step2: WAL checkpoint + 上传本地数据
-            # ⚠️ 用 PASSIVE 模式（非阻塞），不等待主线程未提交的事务，
-            #    upload() 内部会再执行 TRUNCATE 确保完整合并
             try:
-                from app.db.repository import word_repo
-                if word_repo._conn is not None:
-                    word_repo._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                    logger.info("查词后 → WAL PASSIVE checkpoint 完成")
-            except Exception as e:
-                logger.warning(f"查词后 WAL checkpoint 失败: {e}")
+                # Step 1: 上传本地改动
+                if self.check_need_upload(db_path):
+                    logger.info("查词后 → 本地有改动，上传中")
+                    self.upload(db_path)
 
-            ok_up, msg_up = self.upload(db_path)
-            logger.info(f"查词后上传: {msg_up}")
+                # Step 2: 合并远端新数据
+                if self.check_need_download(db_path):
+                    merged = self.merge_from_remote(db_path)
+                    logger.info(f"查词后合并: {merged} 条变更")
+                else:
+                    logger.info("查词后 → 远端无变化，跳过")
+            except Exception as e:
+                logger.warning(f"查词后同步失败: {e}")
 
         threading.Thread(target=_sync, daemon=True).start()
 

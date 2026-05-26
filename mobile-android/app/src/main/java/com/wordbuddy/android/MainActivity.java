@@ -255,8 +255,10 @@ public class MainActivity extends Activity {
         }
         io.submit(() -> {
             try {
-                sync.sync(db, this);
-            } catch (Exception ignored) {
+                String msg = sync.sync(db, this);
+                runOnUiThread(() -> toast("同步: " + msg));
+            } catch (Exception e) {
+                runOnUiThread(() -> toast("同步失败: " + (e.getMessage() != null ? e.getMessage() : "网络错误")));
             }
         });
     }

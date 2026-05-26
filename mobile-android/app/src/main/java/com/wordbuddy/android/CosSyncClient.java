@@ -139,8 +139,8 @@ final class CosSyncClient {
         String urlParamList = "";
         String httpString = method + "\n" + path + "\n\nhost=" + host + "\n";
         String stringToSign = "sha1\n" + time + "\n" + Utils.sha1Hex(httpString) + "\n";
-        byte[] signKey = Utils.hmacSha1(settings.cosSecretKey().getBytes(StandardCharsets.UTF_8), time);
-        String signature = Utils.hmacSha1Hex(signKey, stringToSign);
+        String signKey = Utils.hmacSha1Hex(settings.cosSecretKey().getBytes(StandardCharsets.UTF_8), time);
+        String signature = Utils.hmacSha1Hex(signKey.getBytes(StandardCharsets.UTF_8), stringToSign);
         return "q-sign-algorithm=sha1"
                 + "&q-ak=" + settings.cosSecretId()
                 + "&q-sign-time=" + time

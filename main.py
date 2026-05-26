@@ -122,66 +122,32 @@ class AppController(QObject):
 
     def _startup_sync(self):
         """
-        后台线程：启动同步流程。
-        
-        流程（严格按顺序，每步都安全）：
-          1. 检查远端 ETag vs 本地 MD5 → 是否需要下载
-          2. 需要 → 发信号让主线程关闭 DB → 等待确认 → 下载替换 → 发信号让主线程重开
-          3. 不需要 → 直接返回
-          4. 最后检查是否需要上传本地改动
+        后台线程：启动同步流程（逐词合并策略，无需关闭 DB）。
+        流程：先上传本地改动，再合并远端新数据。
         """
         from app.services.sync_service import sync_service
         from app.config import get_db_path
         db_path = get_db_path()
 
         try:
-            # ── Step 1：检查是否需要下载 ──
-            need_download = sync_service.check_need_download(db_path)
-
-            if not need_download:
-                logger.info("启动同步：远端无更新，跳过下载")
-            else:
-                # ── Step 2：需要下载，先请求主线程关闭 DB ──
-                logger.info("启动同步：检测到远端有更新，请求关闭 DB...")
-                self._db_close_done.clear()
-                self._request_db_close.emit()
-
-                # 等待主线程关闭完成（最多 10 秒）
-                if not self._db_close_done.wait(timeout=10):
-                    logger.error("启动同步：⚠️ 等待 DB 关闭超时！尝试继续...")
-
-                # 验证 DB 确实已关闭
-                from app.db.repository import word_repo
-                if word_repo._conn is not None:
-                    logger.warning("启动同步：DB 连接仍存在，可能关闭失败")
-                    # 强制再试一次（从后台线程直接调 close 是安全的，
-                    # 因为此时主线程事件循环在等我们的信号）
-                    try:
-                        word_repo.close()
-                    except Exception:
-                        pass
-
-                # ── Step 3：DB 已关闭，执行下载替换 ──
-                logger.info("启动同步：开始下载并替换数据库文件...")
-                ok, msg = sync_service.download_to_replace(db_path)
-                logger.info(f"启动同步下载结果: ok={ok}, msg={msg}")
-
-                # ── Step 4：通知主线程重新打开 DB ──
-                logger.info("启动同步：请求重新打开 DB...")
-                self._request_db_reopen.emit()
-
-            # ── Step 5：检查是否有未上传的本地改动 ──
+            # Step 1: 先上传本地改动
             if sync_service.check_need_upload(db_path):
                 logger.info("启动同步：本地有未上传的改动，上传中...")
-                ok_up, msg_up = sync_service.upload(db_path)
+                _, msg_up = sync_service.upload(db_path)
                 logger.info(f"启动同步上传结果: {msg_up}")
             else:
                 logger.info("启动同步：本地无新改动，跳过上传")
 
+            # Step 2: 合并远端新数据
+            if sync_service.check_need_download(db_path):
+                logger.info("启动同步：远端有更新，开始合并...")
+                merged = sync_service.merge_from_remote(db_path)
+                logger.info(f"启动同步合并结果: {merged} 条变更")
+            else:
+                logger.info("启动同步：远端无变化，跳过合并")
+
         except Exception as e:
             logger.error(f"启动同步异常: {e}", exc_info=True)
-            # 出错了也要确保 DB 被重新打开
-            self._request_db_reopen.emit()
 
     # ────────── 复习相关 ──────────
 
@@ -385,45 +351,34 @@ class AppController(QObject):
         self._start_review_timer()
 
     def force_download(self):
-        """强制从云端下载词库（忽略本地数据）"""
+        """强制从云端恢复词库（逐词合并，保留本地进度更高的词）"""
         from app.services.sync_service import sync_service
         from app.db.repository import word_repo
 
         reply = QMessageBox.question(
             None, "WordBuddy — 从云端恢复",
-            "确定要从云端下载词库吗？\n\n本地词库将被覆盖为云端版本。\n"
-            "如果云端词库较旧，本地新增的词可能会丢失。",
+            "确定要从云端恢复词库吗？\n\n云端词库将与本地逐词合并，"
+            "复习进度更高的版本会被保留。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        logger.info("[强制下载] 开始强制从云端恢复...")
+        logger.info("[强制恢复] 开始从云端合并...")
 
         try:
             before_count = word_repo.get_stats()["total"]
         except Exception:
             before_count = -1
 
-        # WAL checkpoint ?????????? DB ??
-        if word_repo._conn is not None:
-            try:
-                word_repo._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except Exception:
-                pass
-        word_repo.close()
-        ok, msg = sync_service.sync_now(
-            close_db_fn=None,
-            reopen_db_fn=self._reload_db,
-            force=True,
-        )
+        ok, msg = sync_service.sync_now(force=True)
 
         try:
             after_count = word_repo.get_stats()["total"]
         except Exception:
             after_count = -1
 
-        logger.info(f"[强制下载] 完成: ok={ok}, msg={msg}, 之前={before_count}词, 现在={after_count}词")
+        logger.info(f"[强制恢复] 完成: ok={ok}, msg={msg}, 之前={before_count}词, 现在={after_count}词")
 
         icon = QSystemTrayIcon.MessageIcon.Information if ok else QSystemTrayIcon.MessageIcon.Warning
         detail = msg
@@ -432,32 +387,19 @@ class AppController(QObject):
         self.tray.showMessage("WordBuddy — 云端恢复", detail, icon, 3000)
 
     def sync_now(self):
-        """立即同步（手动触发，主线程执行）"""
+        """立即同步（手动触发，逐词合并策略）"""
         from app.services.sync_service import sync_service
         from app.db.repository import word_repo
 
         logger.info("[手动同步] 开始...")
 
-        # 记录同步前的单词数
         try:
             before_count = word_repo.get_stats()["total"]
         except Exception:
             before_count = -1
 
-        # 主线程中直接关闭 → 下载 → 重开
-        # WAL checkpoint ?????????? DB ??
-        if word_repo._conn is not None:
-            try:
-                word_repo._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except Exception:
-                pass
-        word_repo.close()
-        ok, msg = sync_service.sync_now(
-            close_db_fn=None,   # 已关闭
-            reopen_db_fn=self._reload_db,
-        )
+        ok, msg = sync_service.sync_now()
 
-        # 记录同步后的单词数
         try:
             after_count = word_repo.get_stats()["total"]
         except Exception:
@@ -466,8 +408,7 @@ class AppController(QObject):
         logger.info(f"[手动同步] 完成: ok={ok}, msg={msg}, 之前={before_count}词, 现在={after_count}词")
 
         icon = QSystemTrayIcon.MessageIcon.Information if ok else QSystemTrayIcon.MessageIcon.Warning
-        # 显示详细结果
-        detail = f"{msg}"
+        detail = str(msg)
         if before_count >= 0 and after_count >= 0 and before_count != after_count:
             detail += f"（{before_count} → {after_count} 词）"
         self.tray.showMessage("WordBuddy — 同步", detail, icon, 3000)
