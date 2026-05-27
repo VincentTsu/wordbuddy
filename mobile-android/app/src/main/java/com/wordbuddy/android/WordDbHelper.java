@@ -325,6 +325,14 @@ final class WordDbHelper extends SQLiteOpenHelper {
         addColumnIfMissing(db, "is_mastered", "INTEGER DEFAULT 0");
         addColumnIfMissing(db, "updated_at", "TEXT DEFAULT ''");
         addColumnIfMissing(db, "deleted_at", "TEXT DEFAULT ''");
+
+        // Fix NULL deleted_at ? SQLite ALTER TABLE DEFAULT only applies to new rows
+        try {
+            db.execSQL("UPDATE words SET deleted_at = '' WHERE deleted_at IS NULL");
+        } catch (Exception ignored) {}
+        try {
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_deleted_at ON words(deleted_at)");
+        } catch (Exception ignored) {}
     }
 
     private void addColumnIfMissing(SQLiteDatabase db, String col, String def) {
