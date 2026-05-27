@@ -236,7 +236,7 @@ final class WordDbHelper extends SQLiteOpenHelper {
                 Word localWord = getByTextIncludingDeleted(remoteWord.word);
                 if (localWord == null) {
                     // New word from remote – insert
-                    getWritableDatabase().insertOrThrow("words", null, valuesFor(remoteWord));
+                    ContentValues cv = valuesFor(remoteWord); cv.remove("id"); getWritableDatabase().insertOrThrow("words", null, cv);
                     changed++;
                 } else {
                     // Both have it – compare updated_at, later wins

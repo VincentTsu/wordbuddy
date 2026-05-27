@@ -178,11 +178,23 @@ class SyncService:
         client, bucket = self._get_client()
         tmp_path = None
         remote_conn = None
+        db_was_closed = False
         try:
+            # Close local DB before download to avoid lock conflicts during slow network
+            from app.db.repository import word_repo
+            if word_repo._conn is not None:
+                word_repo._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                word_repo.close()
+                db_was_closed = True
+
             # Download remote to temp (mkstemp releases file handle immediately on Windows)
             fd, tmp_path = tempfile.mkstemp(suffix=".db")
             os.close(fd)
             client.download_file(Bucket=bucket, Key=COS_OBJECT_KEY, DestFilePath=tmp_path)
+
+            # Reopen local DB
+            if db_was_closed:
+                word_repo.initialize(db_path, force=True)
 
             if os.path.getsize(tmp_path) < 100:
                 return 0
@@ -206,13 +218,15 @@ class SyncService:
                 ).fetchone()
 
                 if local_row is None:
-                    # New word from remote — insert
-                    cols = ", ".join(remote_word.keys())
-                    placeholders = ", ".join("?" * len(remote_word))
+                    # New word from remote - insert (exclude id, let SQLite auto-assign)
+                    cols_no_id = [k for k in remote_word.keys() if k != "id"]
+                    vals_no_id = [remote_word[k] for k in cols_no_id]
+                    cols = ", ".join(cols_no_id)
+                    placeholders = ", ".join("?" * len(cols_no_id))
                     self._safe_execute(
                         word_repo._conn,
                         f"INSERT INTO words ({cols}) VALUES ({placeholders})",
-                        tuple(remote_word.values()),
+                        vals_no_id,
                     )
                     changed += 1
                 else:
@@ -252,6 +266,13 @@ class SyncService:
             return changed
         except Exception as e:
             logger.error(f"merge_from_remote failed: {e}", exc_info=True)
+            # Ensure DB is reopened if we closed it
+            if db_was_closed:
+                try:
+                    from app.db.repository import word_repo
+                    word_repo.initialize(db_path, force=True)
+                except Exception:
+                    pass
             return 0
         finally:
             if remote_conn is not None:
