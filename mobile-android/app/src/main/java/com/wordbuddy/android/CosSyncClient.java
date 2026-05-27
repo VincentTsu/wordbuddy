@@ -115,7 +115,9 @@ final class CosSyncClient {
     void upload(File src) throws Exception {
         HttpURLConnection conn = open("PUT");
         conn.setDoOutput(true);
+        conn.setFixedLengthStreamingMode(src.length());
         conn.setRequestProperty("Content-Type", "application/octet-stream");
+        conn.setRequestProperty("Content-Length", String.valueOf(src.length()));
         try (InputStream in = new FileInputStream(src); OutputStream out = conn.getOutputStream()) {
             copy(in, out);
         }

@@ -398,7 +398,7 @@ class AppController(QObject):
         except Exception:
             before_count = -1
 
-        ok, msg = sync_service.sync_now()
+        ok, msg = sync_service.sync_now(force=True)  # Always pull cloud to catch phone changes
 
         try:
             after_count = word_repo.get_stats()["total"]
