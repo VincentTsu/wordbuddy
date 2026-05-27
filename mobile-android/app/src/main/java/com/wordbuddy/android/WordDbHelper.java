@@ -85,11 +85,19 @@ final class WordDbHelper extends SQLiteOpenHelper {
 
     int count(String where, String[] args) {
         SQLiteDatabase db = getReadableDatabase();
-        String fullWhere = "deleted_at = ''''";
-        if (where != null && !where.trim().isEmpty()) {
-            fullWhere += " AND " + where;
+        StringBuilder fullWhere = new StringBuilder("deleted_at = ''");
+        if (where != null) {
+            String stripped = where.trim();
+            // Strip leading WHERE if present (callers pass "WHERE ...")
+            String upper = stripped.toUpperCase(java.util.Locale.US);
+            if (upper.startsWith("WHERE ")) {
+                stripped = stripped.substring(6).trim();
+            }
+            if (!stripped.isEmpty()) {
+                fullWhere.append(" AND ").append(stripped);
+            }
         }
-        try (Cursor c = db.rawQuery("SELECT COUNT(*) FROM words WHERE " + fullWhere, args)) {
+        try (Cursor c = db.rawQuery("SELECT COUNT(*) FROM words WHERE " + fullWhere.toString(), args)) {
             return c.moveToFirst() ? c.getInt(0) : 0;
         }
     }
