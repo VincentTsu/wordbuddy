@@ -586,6 +586,9 @@ public class MainActivity extends Activity {
         sub.setTextColor(Color.parseColor(TEXT_SUB));
         sub.setPadding(0, dp(4), 0, 0);
         wordHeader.addView(sub);
+        if (currentReviewIsFill) {
+            wordHeader.setVisibility(View.GONE);
+        }
 
         // === Normal mode widget ===
         normalWidget = new LinearLayout(this);
@@ -930,7 +933,7 @@ private void showSettings() {
     // ═══════════════════ SYNC ═══════════════════
 
     private void runSync() {
-        runBusy("同步中...", () -> sync.sync(db, this), this::showHome);
+        runBusy("同步中...", () -> sync.forceSync(db, this), this::showHome);
     }
 
     private void tryUploadAfterChange() {

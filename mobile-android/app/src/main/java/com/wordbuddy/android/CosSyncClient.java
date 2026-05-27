@@ -82,6 +82,38 @@ final class CosSyncClient {
         return "词库已是最新";
     }
 
+    /**
+     * Force sync: always upload to cloud, regardless of MD5 comparison.
+     * Call this from manual "sync now" button.
+     */
+    String forceSync(WordDbHelper db, Context context) throws Exception {
+        if (!settings.hasCos()) {
+            throw new IllegalStateException("please configure COS");
+        }
+        File dbFile = db.dbFile(context);
+        db.checkpoint();
+
+        // Download + merge first (to catch remote changes)
+        try {
+            File tmp = File.createTempFile("wb_remote", ".db", context.getCacheDir());
+            download(tmp);
+            int merged = db.mergeFrom(tmp);
+            tmp.delete();
+            db.checkpoint();
+        } catch (Exception e) {
+            // Cloud might be empty - continue
+        }
+
+        // Always upload local
+        Thread.sleep(100);
+        upload(dbFile);
+        String etag = headEtag();
+        if (etag != null && !etag.isEmpty()) {
+            meta.edit().putString("last_uploaded_etag", etag).apply();
+        }
+        return "synced to cloud";
+    }
+
     // ────────── HTTP helpers ──────────
 
     void download(File dest) throws Exception {
