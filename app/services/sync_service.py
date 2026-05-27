@@ -178,9 +178,9 @@ class SyncService:
         client, bucket = self._get_client()
         tmp_path = None
         try:
-            # Download remote to temp (use NamedTemporaryFile for clean lifecycle)
-            with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-                tmp_path = tmp.name
+            # Download remote to temp (mkstemp releases file handle immediately on Windows)
+            fd, tmp_path = tempfile.mkstemp(suffix=".db")
+            os.close(fd)
             client.download_file(Bucket=bucket, Key=COS_OBJECT_KEY, DestFilePath=tmp_path)
 
             if os.path.getsize(tmp_path) < 100:
@@ -254,19 +254,28 @@ class SyncService:
         remote_etag, _ = self.head_remote()
         if not remote_etag:
             return False
-        if db_path.exists():
-            self._wal_checkpoint()
-            local_md5 = _md5_of_file(db_path)
-            return local_md5 != remote_etag
-        return True
+        if not db_path.exists():
+            return True
+        # Compare with last downloaded ETag (no file read needed)
+        meta = self._load_meta()
+        last_dl = meta.get("last_downloaded_etag", "")
+        return last_dl != remote_etag
 
     def check_need_upload(self, db_path: Path) -> bool:
         if not db_path.exists():
             return False
-        self._wal_checkpoint()
+        # Always upload after merge ? the merged data is always newer
+        # than what was last uploaded.  We rely on the caller to call
+        # this only when there is a real reason to upload.
         meta = self._load_meta()
         last_uploaded = meta.get("last_uploaded_etag", "")
-        local_md5 = _md5_of_file(db_path)
+        # WAL checkpoint before computing MD5
+        self._wal_checkpoint()
+        try:
+            local_md5 = _md5_of_file(db_path)
+        except Exception:
+            # File locked ? skip upload
+            return False
         if not last_uploaded:
             return db_path.stat().st_size > 1024
         return local_md5 != last_uploaded

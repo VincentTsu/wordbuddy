@@ -398,21 +398,7 @@ class AppController(QObject):
         except Exception:
             before_count = -1
 
-        # WAL checkpoint + close DB so md5 check can read the file
-        try:
-            if word_repo._conn is not None:
-                word_repo._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            word_repo.close()
-        except Exception as e:
-            logger.warning(f"?? DB ??: {e}")
-
         ok, msg = sync_service.sync_now()
-
-        # Reopen DB
-        try:
-            word_repo.initialize(get_db_path(), force=True)
-        except Exception as e:
-            logger.error(f"?? DB ??: {e}")
 
         try:
             after_count = word_repo.get_stats()["total"]
