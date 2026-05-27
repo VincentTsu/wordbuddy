@@ -22,6 +22,8 @@ final class Word {
     String createdAt = "";
     String lastReviewedAt = "";
     boolean mastered;
+    String updatedAt = "";
+    String deletedAt = "";
 
     List<String> examples() {
         return parseArray(examplesJson);

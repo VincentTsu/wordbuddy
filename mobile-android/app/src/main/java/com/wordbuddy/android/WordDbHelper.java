@@ -44,10 +44,12 @@ final class WordDbHelper extends SQLiteOpenHelper {
         getWritableDatabase().rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).close();
     }
 
+    // ────────── Queries (all filter out soft-deleted rows) ──────────
+
     List<Word> dueWords() {
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor c = db.rawQuery(
-                "SELECT * FROM words WHERE is_mastered = 0 AND next_review_date != '' "
+                "SELECT * FROM words WHERE deleted_at = '''' AND is_mastered = 0 AND next_review_date != '''' "
                         + "AND next_review_date <= ? ORDER BY RANDOM()",
                 new String[]{Utils.today()})) {
             return readWords(c);
@@ -57,7 +59,7 @@ final class WordDbHelper extends SQLiteOpenHelper {
     List<Word> randomLearningWords(int count) {
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor c = db.rawQuery(
-                "SELECT * FROM words WHERE is_mastered = 0 ORDER BY RANDOM() LIMIT ?",
+                "SELECT * FROM words WHERE deleted_at = '''' AND is_mastered = 0 ORDER BY RANDOM() LIMIT ?",
                 new String[]{String.valueOf(count)})) {
             return readWords(c);
         }
@@ -67,13 +69,15 @@ final class WordDbHelper extends SQLiteOpenHelper {
         SQLiteDatabase db = getReadableDatabase();
         String s = search == null ? "" : search.trim();
         if (s.isEmpty()) {
-            try (Cursor c = db.rawQuery("SELECT * FROM words ORDER BY created_at DESC LIMIT 200", null)) {
+            try (Cursor c = db.rawQuery(
+                    "SELECT * FROM words WHERE deleted_at = '''' ORDER BY created_at DESC LIMIT 200", null)) {
                 return readWords(c);
             }
         }
         String like = "%" + s + "%";
         try (Cursor c = db.rawQuery(
-                "SELECT * FROM words WHERE word LIKE ? OR definition LIKE ? ORDER BY created_at DESC LIMIT 200",
+                "SELECT * FROM words WHERE deleted_at = '''' AND (word LIKE ? OR definition LIKE ?) "
+                        + "ORDER BY created_at DESC LIMIT 200",
                 new String[]{like, like})) {
             return readWords(c);
         }
@@ -81,18 +85,36 @@ final class WordDbHelper extends SQLiteOpenHelper {
 
     int count(String where, String[] args) {
         SQLiteDatabase db = getReadableDatabase();
-        try (Cursor c = db.rawQuery("SELECT COUNT(*) FROM words " + where, args)) {
+        String fullWhere = "deleted_at = ''''";
+        if (where != null && !where.trim().isEmpty()) {
+            fullWhere += " AND " + where;
+        }
+        try (Cursor c = db.rawQuery("SELECT COUNT(*) FROM words WHERE " + fullWhere, args)) {
             return c.moveToFirst() ? c.getInt(0) : 0;
         }
     }
 
     Word getById(int id) {
         SQLiteDatabase db = getReadableDatabase();
-        try (Cursor c = db.rawQuery("SELECT * FROM words WHERE id = ?", new String[]{String.valueOf(id)})) {
+        try (Cursor c = db.rawQuery(
+                "SELECT * FROM words WHERE id = ? AND deleted_at = ''''",
+                new String[]{String.valueOf(id)})) {
             List<Word> words = readWords(c);
             return words.isEmpty() ? null : words.get(0);
         }
     }
+
+    Word getByText(String word) {
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor c = db.rawQuery(
+                "SELECT * FROM words WHERE word = ? COLLATE NOCASE AND deleted_at = ''''",
+                new String[]{word})) {
+            List<Word> words = readWords(c);
+            return words.isEmpty() ? null : words.get(0);
+        }
+    }
+
+    // ────────── Write operations ──────────
 
     void addOrUpdateFromJson(JSONObject data) throws Exception {
         String wordText = data.optString("word").trim();
@@ -100,6 +122,8 @@ final class WordDbHelper extends SQLiteOpenHelper {
             throw new IllegalArgumentException("单词不能为空");
         }
         SQLiteDatabase db = getWritableDatabase();
+        String now = Utils.nowIso();
+
         ContentValues values = new ContentValues();
         values.put("word", wordText);
         values.put("phonetic", data.optString("phonetic"));
@@ -109,6 +133,8 @@ final class WordDbHelper extends SQLiteOpenHelper {
         values.put("examples_json", data.optJSONArray("examples") == null ? "[]" : data.getJSONArray("examples").toString());
         values.put("synonyms_json", data.optJSONArray("synonyms") == null ? "[]" : data.getJSONArray("synonyms").toString());
         values.put("notes", data.optString("notes"));
+        values.put("updated_at", now);
+        values.put("deleted_at", ""); // un-delete if re-added
 
         try (Cursor c = db.rawQuery("SELECT id FROM words WHERE word = ? COLLATE NOCASE", new String[]{wordText})) {
             if (c.moveToFirst()) {
@@ -119,7 +145,7 @@ final class WordDbHelper extends SQLiteOpenHelper {
 
         values.put("review_stage", 0);
         values.put("next_review_date", Utils.dateAfterDays(Constants.REVIEW_INTERVALS[0]));
-        values.put("created_at", Utils.nowIso());
+        values.put("created_at", now);
         db.insertOrThrow("words", null, values);
     }
 
@@ -133,42 +159,56 @@ final class WordDbHelper extends SQLiteOpenHelper {
     }
 
     void markReviewed(int id, String result) {
-        Word word = getById(id);
-        if (word == null) {
-            return;
-        }
+        Word w = getById(id);
+        if (w == null) return;
+
+        int total = w.totalReviews + 1;
+        int correct = w.correctReviews + (result.equals("known") ? 1 : 0);
         int newStage;
-        if ("remembered".equals(result)) {
-            newStage = Math.min(word.reviewStage + 1, Constants.REVIEW_INTERVALS.length);
-        } else if ("fuzzy".equals(result)) {
-            newStage = word.reviewStage;
+
+        if (result.equals("known")) {
+            newStage = w.reviewStage + 1;
+        } else if (result.equals("forgot")) {
+            newStage = Math.max(w.reviewStage - 1, 0);
         } else {
-            newStage = Math.max(word.reviewStage - 1, 0);
+            newStage = w.reviewStage;
         }
 
         boolean mastered = newStage >= Constants.REVIEW_INTERVALS.length;
-        String nextReview = "";
-        if (!mastered) {
-            nextReview = "fuzzy".equals(result)
-                    ? Utils.dateAfterDays(1)
-                    : Utils.dateAfterDays(Constants.REVIEW_INTERVALS[newStage]);
+        String nextReview;
+        if (mastered) {
+            nextReview = "";
+        } else if (result.equals("fuzzy")) {
+            nextReview = Utils.dateAfterDays(1);
+        } else {
+            nextReview = Utils.dateAfterDays(Constants.REVIEW_INTERVALS[newStage]);
         }
 
+        String now = Utils.nowIso();
         ContentValues values = new ContentValues();
         values.put("review_stage", newStage);
         values.put("next_review_date", nextReview);
         values.put("is_mastered", mastered ? 1 : 0);
-        values.put("total_reviews", word.totalReviews + 1);
-        values.put("correct_reviews", word.correctReviews + ("remembered".equals(result) ? 1 : 0));
-        values.put("last_reviewed_at", Utils.nowIso());
+        values.put("total_reviews", total);
+        values.put("correct_reviews", correct);
+        values.put("last_reviewed_at", now);
+        values.put("updated_at", now);
+
         getWritableDatabase().update("words", values, "id = ?", new String[]{String.valueOf(id)});
     }
 
     void deleteWord(int id) {
-        getWritableDatabase().delete("words", "id = ?", new String[]{String.valueOf(id)});
+        String now = Utils.nowIso();
+        ContentValues values = new ContentValues();
+        values.put("deleted_at", now);
+        values.put("updated_at", now);
+        getWritableDatabase().update("words", values, "id = ?", new String[]{String.valueOf(id)});
     }
 
-    int mergeFrom(File otherDbFile, java.util.Set<String> deletedWords) {
+    // ────────── Merge ──────────
+
+    /** Merge remote DB into local. For each word, the side with the newer updated_at wins. */
+    int mergeFrom(File otherDbFile) {
         SQLiteDatabase remote = SQLiteDatabase.openDatabase(
                 otherDbFile.getAbsolutePath(),
                 null,
@@ -177,22 +217,25 @@ final class WordDbHelper extends SQLiteOpenHelper {
         int changed = 0;
         try (Cursor c = remote.rawQuery("SELECT * FROM words", null)) {
             for (Word remoteWord : readWords(c)) {
-                // Skip words that were intentionally deleted on this device
-                if (deletedWords != null && deletedWords.contains(remoteWord.word.toLowerCase())) {
-                    continue;
-                }
-                Word localWord = getByText(remoteWord.word);
+                Word localWord = getByTextIncludingDeleted(remoteWord.word);
                 if (localWord == null) {
+                    // New word from remote – insert
                     getWritableDatabase().insertOrThrow("words", null, valuesFor(remoteWord));
                     changed++;
-                } else if (shouldPreferRemote(localWord, remoteWord)) {
-                    getWritableDatabase().update(
-                            "words",
-                            valuesFor(remoteWord),
-                            "word = ? COLLATE NOCASE",
-                            new String[]{remoteWord.word}
-                    );
-                    changed++;
+                } else {
+                    // Both have it – compare updated_at, later wins
+                    int cmp = remoteWord.updatedAt.compareTo(localWord.updatedAt);
+                    if (cmp > 0) {
+                        // Remote is newer – overwrite local
+                        getWritableDatabase().update(
+                                "words",
+                                valuesFor(remoteWord),
+                                "word = ? COLLATE NOCASE",
+                                new String[]{remoteWord.word}
+                        );
+                        changed++;
+                    }
+                    // else: local is newer or equal – keep local, do nothing
                 }
             }
         } finally {
@@ -200,6 +243,22 @@ final class WordDbHelper extends SQLiteOpenHelper {
         }
         return changed;
     }
+
+    /**
+     * Like getByText but also returns soft-deleted rows (needed for merge,
+     * otherwise a remotely-deleted word would be re-inserted).
+     */
+    private Word getByTextIncludingDeleted(String word) {
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor c = db.rawQuery(
+                "SELECT * FROM words WHERE word = ? COLLATE NOCASE",
+                new String[]{word})) {
+            List<Word> words = readWords(c);
+            return words.isEmpty() ? null : words.get(0);
+        }
+    }
+
+    // ────────── Schema ──────────
 
     private void createTables(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE IF NOT EXISTS words ("
@@ -218,29 +277,16 @@ final class WordDbHelper extends SQLiteOpenHelper {
                 + "correct_reviews INTEGER DEFAULT 0,"
                 + "created_at TEXT NOT NULL,"
                 + "last_reviewed_at TEXT DEFAULT '',"
-                + "is_mastered INTEGER DEFAULT 0"
+                + "is_mastered INTEGER DEFAULT 0,"
+                + "updated_at TEXT DEFAULT '',"
+                + "deleted_at TEXT DEFAULT ''"
                 + ")");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_next_review ON words(next_review_date)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_is_mastered ON words(is_mastered)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_deleted_at ON words(deleted_at)");
     }
 
-    Word getByText(String word) {
-        SQLiteDatabase db = getReadableDatabase();
-        try (Cursor c = db.rawQuery("SELECT * FROM words WHERE word = ? COLLATE NOCASE", new String[]{word})) {
-            List<Word> words = readWords(c);
-            return words.isEmpty() ? null : words.get(0);
-        }
-    }
-
-    private boolean shouldPreferRemote(Word local, Word remote) {
-        if (local.definition.isEmpty() && !remote.definition.isEmpty()) {
-            return true;
-        }
-        if (remote.lastReviewedAt.compareTo(local.lastReviewedAt) > 0) {
-            return true;
-        }
-        return remote.totalReviews > local.totalReviews;
-    }
+    // ────────── Internal helpers ──────────
 
     private ContentValues valuesFor(Word w) {
         ContentValues values = new ContentValues();
@@ -259,6 +305,8 @@ final class WordDbHelper extends SQLiteOpenHelper {
         values.put("created_at", w.createdAt == null || w.createdAt.isEmpty() ? Utils.nowIso() : w.createdAt);
         values.put("last_reviewed_at", w.lastReviewedAt);
         values.put("is_mastered", w.mastered ? 1 : 0);
+        values.put("updated_at", w.updatedAt == null || w.updatedAt.isEmpty() ? Utils.nowIso() : w.updatedAt);
+        values.put("deleted_at", w.deletedAt == null ? "" : w.deletedAt);
         return values;
     }
 
@@ -267,6 +315,8 @@ final class WordDbHelper extends SQLiteOpenHelper {
         addColumnIfMissing(db, "correct_reviews", "INTEGER DEFAULT 0");
         addColumnIfMissing(db, "last_reviewed_at", "TEXT DEFAULT ''");
         addColumnIfMissing(db, "is_mastered", "INTEGER DEFAULT 0");
+        addColumnIfMissing(db, "updated_at", "TEXT DEFAULT ''");
+        addColumnIfMissing(db, "deleted_at", "TEXT DEFAULT ''");
     }
 
     private void addColumnIfMissing(SQLiteDatabase db, String col, String def) {
@@ -300,6 +350,8 @@ final class WordDbHelper extends SQLiteOpenHelper {
             w.createdAt = colString(c, "created_at");
             w.lastReviewedAt = colString(c, "last_reviewed_at");
             w.mastered = colInt(c, "is_mastered") == 1;
+            w.updatedAt = colString(c, "updated_at");
+            w.deletedAt = colString(c, "deleted_at");
             out.add(w);
         }
         return out;

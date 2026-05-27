@@ -508,7 +508,6 @@ public class MainActivity extends Activity {
                 .setNegativeButton("取消", null)
                 .setPositiveButton("删除", (d, which) -> {
                     db.deleteWord(id);
-                    sync.trackDeletion(word);
                     tryUploadAfterChange();
                     showLibrary("");
                 })
