@@ -14,3 +14,5 @@ mobile-android/local.properties
 *.bak
 *.backup
 nul
+
+mobile-android/app/src/main/assets/credentials.properties
