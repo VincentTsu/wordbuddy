@@ -686,7 +686,7 @@ public class MainActivity extends Activity {
         java.util.List<String> examples = w.examples();
         if (!examples.isEmpty()) {
             String sentence = examples.get(0);
-            String blanked = sentence.replaceAll("(?i)\b" + java.util.regex.Pattern.quote(w.word) + "\b", "______");
+            String blanked = sentence.replaceFirst("(?i)\\b" + java.util.regex.Pattern.quote(w.word) + "\\b", "______");
             View sp = new View(this);
             sp.setLayoutParams(new LinearLayout.LayoutParams(1, dp(16)));
             fillWidget.addView(sp);
