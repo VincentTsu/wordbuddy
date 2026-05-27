@@ -49,7 +49,7 @@ final class WordDbHelper extends SQLiteOpenHelper {
     List<Word> dueWords() {
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor c = db.rawQuery(
-                "SELECT * FROM words WHERE deleted_at = '''' AND is_mastered = 0 AND next_review_date != '''' "
+                "SELECT * FROM words WHERE deleted_at = '' AND is_mastered = 0 AND next_review_date != '' "
                         + "AND next_review_date <= ? ORDER BY RANDOM()",
                 new String[]{Utils.today()})) {
             return readWords(c);
@@ -59,7 +59,7 @@ final class WordDbHelper extends SQLiteOpenHelper {
     List<Word> randomLearningWords(int count) {
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor c = db.rawQuery(
-                "SELECT * FROM words WHERE deleted_at = '''' AND is_mastered = 0 ORDER BY RANDOM() LIMIT ?",
+                "SELECT * FROM words WHERE deleted_at = '' AND is_mastered = 0 ORDER BY RANDOM() LIMIT ?",
                 new String[]{String.valueOf(count)})) {
             return readWords(c);
         }
@@ -70,13 +70,13 @@ final class WordDbHelper extends SQLiteOpenHelper {
         String s = search == null ? "" : search.trim();
         if (s.isEmpty()) {
             try (Cursor c = db.rawQuery(
-                    "SELECT * FROM words WHERE deleted_at = '''' ORDER BY created_at DESC LIMIT 200", null)) {
+                    "SELECT * FROM words WHERE deleted_at = '' ORDER BY created_at DESC LIMIT 200", null)) {
                 return readWords(c);
             }
         }
         String like = "%" + s + "%";
         try (Cursor c = db.rawQuery(
-                "SELECT * FROM words WHERE deleted_at = '''' AND (word LIKE ? OR definition LIKE ?) "
+                "SELECT * FROM words WHERE deleted_at = '' AND (word LIKE ? OR definition LIKE ?) "
                         + "ORDER BY created_at DESC LIMIT 200",
                 new String[]{like, like})) {
             return readWords(c);
@@ -105,7 +105,7 @@ final class WordDbHelper extends SQLiteOpenHelper {
     Word getById(int id) {
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor c = db.rawQuery(
-                "SELECT * FROM words WHERE id = ? AND deleted_at = ''''",
+                "SELECT * FROM words WHERE id = ? AND deleted_at = ''",
                 new String[]{String.valueOf(id)})) {
             List<Word> words = readWords(c);
             return words.isEmpty() ? null : words.get(0);
@@ -115,7 +115,7 @@ final class WordDbHelper extends SQLiteOpenHelper {
     Word getByText(String word) {
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor c = db.rawQuery(
-                "SELECT * FROM words WHERE word = ? COLLATE NOCASE AND deleted_at = ''''",
+                "SELECT * FROM words WHERE word = ? COLLATE NOCASE AND deleted_at = ''",
                 new String[]{word})) {
             List<Word> words = readWords(c);
             return words.isEmpty() ? null : words.get(0);
