@@ -216,6 +216,14 @@ final class WordDbHelper extends SQLiteOpenHelper {
     // ────────── Merge ──────────
 
     /** Merge remote DB into local. For each word, the side with the newer updated_at wins. */
+    List<Word> masteredWords() {
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor c = db.rawQuery(
+                "SELECT * FROM words WHERE deleted_at = '' AND is_mastered = 1 ORDER BY created_at DESC", null)) {
+            return readWords(c);
+        }
+    }
+
     int mergeFrom(File otherDbFile) {
         SQLiteDatabase remote = SQLiteDatabase.openDatabase(
                 otherDbFile.getAbsolutePath(),

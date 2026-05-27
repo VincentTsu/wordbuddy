@@ -64,6 +64,10 @@ final class SettingsStore {
         return prefs.getString("cos_region", "ap-guangzhou");
     }
 
+    int fillRatio() {
+        return prefs.getInt("fill_ratio", 25);
+    }
+
     boolean hasCos() {
         return !cosSecretId().isEmpty() && !cosSecretKey().isEmpty()
                 && !cosBucket().isEmpty() && !cosRegion().isEmpty();
