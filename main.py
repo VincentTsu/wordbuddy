@@ -387,33 +387,45 @@ class AppController(QObject):
         self.tray.showMessage("WordBuddy — 云端恢复", detail, icon, 3000)
 
     def sync_now(self):
-        """立即同步（手动触发，逐词合并策略）"""
+        """?????????????????"""
         from app.services.sync_service import sync_service
         from app.db.repository import word_repo
 
-        logger.info("[手动同步] 开始...")
+        logger.info("[????] ??...")
 
         try:
             before_count = word_repo.get_stats()["total"]
         except Exception:
             before_count = -1
 
+        # WAL checkpoint + close DB so md5 check can read the file
+        try:
+            if word_repo._conn is not None:
+                word_repo._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            word_repo.close()
+        except Exception as e:
+            logger.warning(f"?? DB ??: {e}")
+
         ok, msg = sync_service.sync_now()
+
+        # Reopen DB
+        try:
+            word_repo.initialize(get_db_path(), force=True)
+        except Exception as e:
+            logger.error(f"?? DB ??: {e}")
 
         try:
             after_count = word_repo.get_stats()["total"]
         except Exception:
             after_count = -1
 
-        logger.info(f"[手动同步] 完成: ok={ok}, msg={msg}, 之前={before_count}词, 现在={after_count}词")
+        logger.info(f"[????] ??: ok={ok}, msg={msg}, ??={before_count}?, ??={after_count}?")
 
         icon = QSystemTrayIcon.MessageIcon.Information if ok else QSystemTrayIcon.MessageIcon.Warning
         detail = str(msg)
         if before_count >= 0 and after_count >= 0 and before_count != after_count:
-            detail += f"（{before_count} → {after_count} 词）"
-        self.tray.showMessage("WordBuddy — 同步", detail, icon, 3000)
-
-
+            detail += f"?{before_count} ? {after_count} ??"
+        self.tray.showMessage("WordBuddy ? ??", detail, icon, 3000)
 def main():
     # 高 DPI 支持
     QApplication.setHighDpiScaleFactorRoundingPolicy(

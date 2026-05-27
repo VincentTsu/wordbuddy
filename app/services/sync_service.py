@@ -178,9 +178,9 @@ class SyncService:
         client, bucket = self._get_client()
         tmp_path = None
         try:
-            # Download remote to temp
-            fd, tmp_path = tempfile.mkstemp(suffix=".db")
-            os.close(fd)
+            # Download remote to temp (use NamedTemporaryFile for clean lifecycle)
+            with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+                tmp_path = tmp.name
             client.download_file(Bucket=bucket, Key=COS_OBJECT_KEY, DestFilePath=tmp_path)
 
             if os.path.getsize(tmp_path) < 100:
