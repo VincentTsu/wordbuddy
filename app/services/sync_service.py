@@ -177,6 +177,7 @@ class SyncService:
 
         client, bucket = self._get_client()
         tmp_path = None
+        remote_conn = None
         try:
             # Download remote to temp (mkstemp releases file handle immediately on Windows)
             fd, tmp_path = tempfile.mkstemp(suffix=".db")
@@ -184,7 +185,6 @@ class SyncService:
             client.download_file(Bucket=bucket, Key=COS_OBJECT_KEY, DestFilePath=tmp_path)
 
             if os.path.getsize(tmp_path) < 100:
-                os.unlink(tmp_path)
                 return 0
 
             remote_conn = sqlite3.connect(tmp_path)
@@ -193,6 +193,7 @@ class SyncService:
             from app.db.repository import word_repo
 
             changed = 0
+            batch = 0
             for row in remote_conn.execute("SELECT * FROM words"):
                 remote_word = dict(row)
                 remote_word_text = remote_word["word"]
@@ -208,7 +209,8 @@ class SyncService:
                     # New word from remote — insert
                     cols = ", ".join(remote_word.keys())
                     placeholders = ", ".join("?" * len(remote_word))
-                    word_repo._conn.execute(
+                    self._safe_execute(
+                        word_repo._conn,
                         f"INSERT INTO words ({cols}) VALUES ({placeholders})",
                         tuple(remote_word.values()),
                     )
@@ -221,14 +223,21 @@ class SyncService:
                         set_clause = ", ".join(f"{k} = ?" for k in remote_word if k != "id")
                         values = [remote_word[k] for k in remote_word if k != "id"]
                         values.append(local_word["id"])
-                        word_repo._conn.execute(
+                        self._safe_execute(
+                            word_repo._conn,
                             f"UPDATE words SET {set_clause} WHERE id = ?",
                             values,
                         )
                         changed += 1
                     # else: local is newer or equal — keep local
 
-            remote_conn.close()
+                batch += 1
+                if batch % 20 == 0:
+                    try:
+                        word_repo._conn.commit()
+                    except Exception:
+                        pass
+
             if changed > 0:
                 word_repo._conn.commit()
             logger.info(f"merge_from_remote: {changed} rows changed")
@@ -245,10 +254,31 @@ class SyncService:
             logger.error(f"merge_from_remote failed: {e}", exc_info=True)
             return 0
         finally:
+            if remote_conn is not None:
+                try:
+                    remote_conn.close()
+                except Exception:
+                    pass
             if tmp_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
-    # ────────── Sync checks ──────────
+    @staticmethod
+    def _safe_execute(conn, sql, params):
+        """Execute SQL with retry for "database is locked" errors."""
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                conn.execute(sql, params)
+                return
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e).lower() and attempt < max_retries - 1:
+                    time.sleep(0.05 * (attempt + 1))
+                else:
+                    raise
+
 
     def check_need_download(self, db_path: Path) -> bool:
         remote_etag, _ = self.head_remote()
