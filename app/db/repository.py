@@ -6,7 +6,7 @@ Word CRUD + Ebbinghaus review + soft-delete + updated_at for timestamp-based syn
 import sqlite3
 import json
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -18,7 +18,7 @@ NOT_DELETED = "deleted_at = ''"
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 class Word:

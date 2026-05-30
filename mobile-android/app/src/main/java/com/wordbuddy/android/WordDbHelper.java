@@ -42,7 +42,23 @@ final class WordDbHelper extends SQLiteOpenHelper {
     }
 
     void checkpoint() {
-        getWritableDatabase().rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).close();
+        SQLiteDatabase db = getWritableDatabase();
+        // Toggle journal mode to force WAL frames into main DB file.
+        // Switching DELETE -> WAL checkpoints all pending frames first.
+        try {
+            db.execSQL("PRAGMA journal_mode=DELETE");
+            db.execSQL("PRAGMA journal_mode=WAL");
+            db.execSQL("PRAGMA foreign_keys=ON");
+        } catch (Exception e) {
+            // Fallback: rawQuery with proper cursor read
+            for (int i = 0; i < 3; i++) {
+                android.database.Cursor c = db.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null);
+                boolean ok = c.moveToFirst() && c.getInt(0) == 0;
+                c.close();
+                if (ok) return;
+                try { Thread.sleep(100); } catch (InterruptedException ignored) { break; }
+            }
+        }
     }
 
     // ────────── Queries (all filter out soft-deleted rows) ──────────

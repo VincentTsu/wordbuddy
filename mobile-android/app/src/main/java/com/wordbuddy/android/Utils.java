@@ -7,6 +7,7 @@ import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.TimeZone;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -20,7 +21,9 @@ final class Utils {
     }
 
     static String nowIso() {
-        return new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(new Date());
+        SimpleDateFormat fmt = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US);
+        fmt.setTimeZone(TimeZone.getTimeZone("UTC"));
+        return fmt.format(new Date());
     }
 
     static String dateAfterDays(int days) {

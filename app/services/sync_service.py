@@ -80,7 +80,9 @@ class SyncService:
         try:
             from app.db.repository import word_repo
             if word_repo._conn is not None:
-                word_repo._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                word_repo._conn.execute("PRAGMA journal_mode=DELETE")
+                word_repo._conn.execute("PRAGMA journal_mode=WAL")
+                word_repo._conn.execute("PRAGMA foreign_keys=ON")
         except Exception:
             pass
 
@@ -141,16 +143,8 @@ class SyncService:
         if not local_db_path.exists():
             return False, "Local DB file does not exist"
 
-        # WAL checkpoint before upload
-        try:
-            from app.db.repository import word_repo
-            if word_repo._conn is not None:
-                word_repo._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                time.sleep(0.05)
-                word_repo._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                logger.debug("WAL checkpoint before upload complete")
-        except Exception as e:
-            logger.warning(f"WAL checkpoint before upload failed (non-fatal): {e}")
+        # Force WAL frames into main DB before upload
+        self._wal_checkpoint()
 
         try:
             client, bucket = self._get_client()

@@ -91,21 +91,25 @@ final class CosSyncClient {
             throw new IllegalStateException("please configure COS");
         }
         File dbFile = db.dbFile(context);
-        db.checkpoint();
 
         // Download + merge first (to catch remote changes)
         try {
+            db.checkpoint();
             File tmp = File.createTempFile("wb_remote", ".db", context.getCacheDir());
             download(tmp);
             int merged = db.mergeFrom(tmp);
             tmp.delete();
             db.checkpoint();
         } catch (Exception e) {
-            // Cloud might be empty - continue
+            // Cloud might be empty — log and continue with local data
+            android.util.Log.w("WordBuddy", "forceSync download/merge skipped: " + e.getMessage());
         }
 
-        // Always upload local
-        Thread.sleep(100);
+        // Ensure WAL is fully flushed to main DB before reading for upload
+        db.checkpoint();
+        Thread.sleep(200);
+        db.checkpoint();
+
         upload(dbFile);
         String etag = headEtag();
         if (etag != null && !etag.isEmpty()) {
